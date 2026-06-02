@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>🦞 Lobster Pinch</title>
+<style>
+  :root {
+    --sea-top: #0b2a4a;
+    --sea-bot: #0a4d6e;
+    --accent: #ff6b4a;
+    --accent-2: #ffd23f;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: linear-gradient(180deg, var(--sea-top), var(--sea-bot));
+    color: #fff;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #stage {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+  }
+  /* Mirror the webcam so it acts like a mirror */
+  #cam {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);
+    opacity: 0.28;
+    filter: saturate(0.7) brightness(0.8);
+  }
+  #overlay {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+  .lobster {
+    position: absolute;
+    font-size: 54px;
+    will-change: transform;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    filter: drop-shadow(0 4px 6px rgba(0,0,0,.45));
+    transition: opacity .2s ease;
+  }
+  .lobster.caught {
+    animation: pop .35s ease forwards;
+  }
+  @keyframes pop {
+    0%   { transform: translate(-50%,-50%) scale(1); opacity: 1; }
+    60%  { transform: translate(-50%,-50%) scale(1.6); opacity: 1; }
+    100% { transform: translate(-50%,-90%) scale(0.2); opacity: 0; }
+  }
+  /* Hand cursor (pinch point) */
+  #cursor {
+    position: absolute;
+    width: 64px;
+    height: 64px;
+    margin: -32px 0 0 -32px;
+    border-radius: 50%;
+    border: 3px solid rgba(255,255,255,.85);
+    background: rgba(255,210,63,.12);
+    pointer-events: none;
+    transition: width .08s, height .08s, margin .08s, background .08s, border-color .08s;
+    display: none;
+    z-index: 5;
+  }
+  #cursor.pinching {
+    width: 30px;
+    height: 30px;
+    margin: -15px 0 0 -15px;
+    background: rgba(255,107,74,.55);
+    border-color: var(--accent-2);
+  }
+
+  /* HUD */
+  #hud {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 20px;
+    font-weight: 700;
+    font-size: 22px;
+    text-shadow: 0 2px 6px rgba(0,0,0,.5);
+    z-index: 6;
+    pointer-events: none;
+  }
+  #hud .pill {
+    background: rgba(0,0,0,.35);
+    padding: 8px 16px;
+    border-radius: 999px;
+    backdrop-filter: blur(4px);
+  }
+
+  /* Panels */
+  .panel {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    gap: 18px;
+    padding: 24px;
+    background: rgba(4,18,34,.72);
+    backdrop-filter: blur(6px);
+    z-index: 10;
+  }
+  .panel.hidden { display: none; }
+  .panel h1 { font-size: clamp(34px, 7vw, 64px); letter-spacing: -1px; }
+  .panel h1 .em { font-size: 1.1em; }
+  .panel p { font-size: clamp(15px, 2.6vw, 19px); max-width: 540px; line-height: 1.5; opacity: .92; }
+  .panel .score-big { font-size: clamp(40px, 9vw, 80px); color: var(--accent-2); font-weight: 800; }
+  button {
+    font: inherit;
+    font-weight: 700;
+    font-size: 20px;
+    color: #15243a;
+    background: linear-gradient(180deg, #ffe27a, var(--accent-2));
+    border: none;
+    padding: 14px 34px;
+    border-radius: 999px;
+    cursor: pointer;
+    box-shadow: 0 6px 18px rgba(0,0,0,.4);
+    transition: transform .1s ease, filter .1s ease;
+  }
+  button:hover { transform: translateY(-2px); filter: brightness(1.05); }
+  button:active { transform: translateY(0); }
+  .hint { font-size: 14px; opacity: .7; }
+  .status { font-size: 14px; opacity: .8; min-height: 20px; }
+  a { color: var(--accent-2); }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="cam" autoplay playsinline muted></video>
+  <div id="overlay"></div>
+  <div id="cursor"></div>
+
+  <div id="hud">
+    <div class="pill">🦞 <span id="score">0</span></div>
+    <div class="pill">⏱ <span id="time">60</span></div>
+  </div>
+
+  <!-- Start panel -->
+  <div id="startPanel" class="panel">
+    <h1><span class="em">🦞</span> Lobster Pinch</h1>
+    <p>Catch lobsters with your hand! Move your hand in front of the webcam, then <b>pinch your thumb and index finger together</b> right on a lobster to snag it.</p>
+    <p class="hint">Works best in a well-lit room. Your camera stays on your device — nothing is uploaded.</p>
+    <button id="startBtn">Allow camera &amp; play</button>
+    <div id="status" class="status"></div>
+  </div>
+
+  <!-- Game over panel -->
+  <div id="endPanel" class="panel hidden">
+    <h1>Time's up! 🎣</h1>
+    <div class="score-big"><span id="finalScore">0</span> lobsters</div>
+    <p id="endMsg"></p>
+    <button id="againBtn">Play again</button>
+  </div>
+</div>
+
+<!-- MediaPipe Hands via CDN -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js" crossorigin="anonymous"></script>
+<script>
+(function () {
+  "use strict";
+
+  const GAME_SECONDS = 60;
+  const MAX_LOBSTERS = 6;
+  const CATCH_RADIUS = 70;     // px around pinch point that counts as a catch
+  const PINCH_ON = 0.05;       // normalized thumb-index distance to start a pinch
+  const PINCH_OFF = 0.08;      // release threshold (hysteresis)
+
+  const stage = document.getElementById("stage");
+  const overlay = document.getElementById("overlay");
+  const cam = document.getElementById("cam");
+  const cursor = document.getElementById("cursor");
+  const scoreEl = document.getElementById("score");
+  const timeEl = document.getElementById("time");
+  const statusEl = document.getElementById("status");
+
+  const startPanel = document.getElementById("startPanel");
+  const endPanel = document.getElementById("endPanel");
+  const startBtn = document.getElementById("startBtn");
+  const againBtn = document.getElementById("againBtn");
+  const finalScoreEl = document.getElementById("finalScore");
+  const endMsg = document.getElementById("endMsg");
+
+  let score = 0;
+  let timeLeft = GAME_SECONDS;
+  let running = false;
+  let pinching = false;
+  let pinchX = -999, pinchY = -999;
+  let handSeen = false;
+  let lobsters = [];
+  let timerId = null;
+  let rafId = null;
+  let lastTs = 0;
+
+  // ---- Lobster entities ----
+  function spawnLobster() {
+    const el = document.createElement("div");
+    el.className = "lobster";
+    el.textContent = "🦞";
+    overlay.appendChild(el);
+    const margin = 60;
+    const w = window.innerWidth, h = window.innerHeight;
+    const lob = {
+      el,
+      x: margin + Math.random() * (w - margin * 2),
+      y: margin + Math.random() * (h - margin * 2),
+      vx: (Math.random() * 2 - 1) * 90,
+      vy: (Math.random() * 2 - 1) * 90,
+      alive: true,
+    };
+    lobsters.push(lob);
+    draw(lob);
+  }
+
+  function draw(lob) {
+    lob.el.style.left = lob.x + "px";
+    lob.el.style.top = lob.y + "px";
+  }
+
+  function updateLobsters(dt) {
+    const w = window.innerWidth, h = window.innerHeight;
+    for (const lob of lobsters) {
+      if (!lob.alive) continue;
+      lob.x += lob.vx * dt;
+      lob.y += lob.vy * dt;
+      // bounce off edges
+      if (lob.x < 40) { lob.x = 40; lob.vx = Math.abs(lob.vx); }
+      if (lob.x > w - 40) { lob.x = w - 40; lob.vx = -Math.abs(lob.vx); }
+      if (lob.y < 40) { lob.y = 40; lob.vy = Math.abs(lob.vy); }
+      if (lob.y > h - 40) { lob.y = h - 40; lob.vy = -Math.abs(lob.vy); }
+      // gentle facing flip based on direction
+      lob.el.style.transform = "translate(-50%, -50%) scaleX(" + (lob.vx < 0 ? -1 : 1) + ")";
+      draw(lob);
+    }
+  }
+
+  function tryCatch() {
+    if (!pinching) return;
+    for (const lob of lobsters) {
+      if (!lob.alive) continue;
+      const dx = lob.x - pinchX;
+      const dy = lob.y - pinchY;
+      if (dx * dx + dy * dy <= CATCH_RADIUS * CATCH_RADIUS) {
+        lob.alive = false;
+        lob.el.classList.add("caught");
+        const dead = lob.el;
+        setTimeout(() => dead.remove(), 400);
+        score++;
+        scoreEl.textContent = score;
+        // respawn a fresh one shortly
+        setTimeout(() => { if (running && countAlive() < MAX_LOBSTERS) spawnLobster(); }, 350);
+        break; // one catch per pinch frame feels fair
+      }
+    }
+  }
+
+  function countAlive() {
+    return lobsters.filter((l) => l.alive).length;
+  }
+
+  // ---- Main loop ----
+  function loop(ts) {
+    if (!running) return;
+    if (!lastTs) lastTs = ts;
+    const dt = Math.min((ts - lastTs) / 1000, 0.05);
+    lastTs = ts;
+
+    updateLobsters(dt);
+    tryCatch();
+
+    rafId = requestAnimationFrame(loop);
+  }
+
+  // ---- Pinch / hand tracking ----
+  function onResults(results) {
+    const hands = results.multiHandLandmarks;
+    if (!hands || hands.length === 0) {
+      handSeen = false;
+      cursor.style.display = "none";
+      pinching = false;
+      cursor.classList.remove("pinching");
+      if (running) statusEl.textContent = "";
+      return;
+    }
+    handSeen = true;
+    const lm = hands[0];
+    const thumb = lm[4];
+    const index = lm[8];
+
+    // midpoint between thumb & index = the pinch point
+    const mx = (thumb.x + index.x) / 2;
+    const my = (thumb.y + index.y) / 2;
+
+    // video is mirrored on screen, so flip x to match
+    pinchX = (1 - mx) * window.innerWidth;
+    pinchY = my * window.innerHeight;
+
+    // 3D-ish distance (normalized) between thumb & index
+    const dx = thumb.x - index.x;
+    const dy = thumb.y - index.y;
+    const dz = (thumb.z || 0) - (index.z || 0);
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+    // hysteresis so it doesn't flicker
+    if (!pinching && dist < PINCH_ON) pinching = true;
+    else if (pinching && dist > PINCH_OFF) pinching = false;
+
+    cursor.style.display = "block";
+    cursor.style.left = pinchX + "px";
+    cursor.style.top = pinchY + "px";
+    cursor.classList.toggle("pinching", pinching);
+  }
+
+  let hands = null;
+  let camera = null;
+
+  async function initHands() {
+    hands = new Hands({
+      locateFile: (file) =>
+        "https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/" + file,
+    });
+    hands.setOptions({
+      maxNumHands: 1,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.6,
+    });
+    hands.onResults(onResults);
+  }
+
+  async function startCamera() {
+    camera = new Camera(cam, {
+      onFrame: async () => { await hands.send({ image: cam }); },
+      width: 640,
+      height: 480,
+    });
+    await camera.start();
+  }
+
+  // ---- Game flow ----
+  function clearLobsters() {
+    for (const lob of lobsters) lob.el.remove();
+    lobsters = [];
+  }
+
+  function startGame() {
+    clearLobsters();
+    score = 0;
+    timeLeft = GAME_SECONDS;
+    scoreEl.textContent = "0";
+    timeEl.textContent = String(timeLeft);
+    running = true;
+    lastTs = 0;
+    endPanel.classList.add("hidden");
+
+    for (let i = 0; i < 3; i++) spawnLobster();
+
+    timerId = setInterval(() => {
+      timeLeft--;
+      timeEl.textContent = String(Math.max(0, timeLeft));
+      if (timeLeft <= 0) endGame();
+    }, 1000);
+
+    rafId = requestAnimationFrame(loop);
+  }
+
+  function endGame() {
+    running = false;
+    clearInterval(timerId);
+    cancelAnimationFrame(rafId);
+    clearLobsters();
+    finalScoreEl.textContent = String(score);
+    endMsg.textContent = ratingMessage(score);
+    endPanel.classList.remove("hidden");
+  }
+
+  function ratingMessage(s) {
+    if (s === 0) return "The lobsters got away. Try better lighting and pinch right on them!";
+    if (s < 10) return "Nice start, deckhand. 🦞";
+    if (s < 20) return "Solid haul! You've got the pinch down.";
+    if (s < 35) return "Master trapper! 🎣 The bay is impressed.";
+    return "Legendary lobster whisperer! 👑🦞";
+  }
+
+  async function onStart() {
+    startBtn.disabled = true;
+    statusEl.textContent = "Loading hand tracking…";
+    try {
+      await initHands();
+      statusEl.textContent = "Requesting camera…";
+      await startCamera();
+      statusEl.textContent = "";
+      startPanel.classList.add("hidden");
+      startGame();
+    } catch (err) {
+      console.error(err);
+      startBtn.disabled = false;
+      statusEl.innerHTML =
+        "Couldn't start the camera: " + (err && err.message ? err.message : err) +
+        "<br>Allow camera access and make sure you're on https.";
+    }
+  }
+
+  startBtn.addEventListener("click", onStart);
+  againBtn.addEventListener("click", startGame);
+})();
+</script>
+</body>
+</html>
