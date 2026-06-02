@@ -60,6 +60,73 @@
     60%  { transform: translate(-50%,-50%) scale(1.6); opacity: 1; }
     100% { transform: translate(-50%,-90%) scale(0.2); opacity: 0; }
   }
+
+  /* Explosions */
+  .boom {
+    position: absolute;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 7;
+  }
+  .boom .flash {
+    position: absolute;
+    left: 50%; top: 50%;
+    width: 30px; height: 30px;
+    margin: -15px 0 0 -15px;
+    border-radius: 50%;
+    background: radial-gradient(circle, #fff 0%, var(--accent-2) 35%, rgba(255,107,74,0) 70%);
+    animation: flash .45s ease-out forwards;
+  }
+  .boom.bad .flash {
+    background: radial-gradient(circle, #fff 0%, #ff4d4d 35%, rgba(255,0,0,0) 70%);
+  }
+  @keyframes flash {
+    0%   { transform: scale(.2); opacity: 1; }
+    100% { transform: scale(4); opacity: 0; }
+  }
+  .spark {
+    position: absolute;
+    left: 50%; top: 50%;
+    width: 9px; height: 9px;
+    margin: -4.5px 0 0 -4.5px;
+    border-radius: 50%;
+    background: var(--accent-2);
+    will-change: transform, opacity;
+  }
+  .boom.bad .spark { background: #ff5c5c; }
+
+  /* Floating score popups */
+  .popup {
+    position: absolute;
+    transform: translate(-50%, -50%);
+    font-weight: 800;
+    font-size: 30px;
+    pointer-events: none;
+    z-index: 8;
+    text-shadow: 0 2px 6px rgba(0,0,0,.6);
+    animation: rise .8s ease-out forwards;
+  }
+  .popup.plus { color: var(--accent-2); }
+  .popup.minus { color: #ff6b6b; }
+  @keyframes rise {
+    0%   { transform: translate(-50%, -50%) scale(.6); opacity: 0; }
+    20%  { transform: translate(-50%, -70%) scale(1.1); opacity: 1; }
+    100% { transform: translate(-50%, -160%) scale(1); opacity: 0; }
+  }
+
+  /* Red damage flash over the whole screen when a shark bites */
+  #damage {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: radial-gradient(circle, rgba(255,0,0,0) 40%, rgba(255,0,0,.35) 100%);
+    opacity: 0;
+    z-index: 4;
+  }
+  #damage.hit { animation: dmg .4s ease-out; }
+  @keyframes dmg {
+    0% { opacity: 0; } 30% { opacity: 1; } 100% { opacity: 0; }
+  }
   /* Hand cursor (pinch point) */
   #cursor {
     position: absolute;
@@ -147,6 +214,7 @@
 <div id="stage">
   <video id="cam" autoplay playsinline muted></video>
   <div id="overlay"></div>
+  <div id="damage"></div>
   <div id="cursor"></div>
 
   <div id="hud">
@@ -157,7 +225,7 @@
   <!-- Start panel -->
   <div id="startPanel" class="panel">
     <h1><span class="em">🦞</span> Lobster Pinch</h1>
-    <p>Catch lobsters with your hand! Move your hand in front of the webcam, then <b>pinch your thumb and index finger together</b> right on a lobster to snag it.</p>
+    <p>Catch lobsters with your hand! Move your hand in front of the webcam, then <b>pinch your thumb and index finger together</b> right on a lobster to snag it (+1). Watch out for <b>sharks 🦈</b> — pinch one and you lose points!</p>
     <p class="hint">Works best in a well-lit room. Your camera stays on your device — nothing is uploaded.</p>
     <button id="startBtn">Allow camera &amp; play</button>
     <div id="status" class="status"></div>
@@ -181,6 +249,8 @@
 
   const GAME_SECONDS = 60;
   const MAX_LOBSTERS = 6;
+  const MAX_SHARKS = 3;
+  const SHARK_POINTS = 3;      // points lost when you pinch a shark
   const CATCH_RADIUS = 70;     // px around pinch point that counts as a catch
   const PINCH_ON = 0.05;       // normalized thumb-index distance to start a pinch
   const PINCH_OFF = 0.08;      // release threshold (hysteresis)
@@ -189,6 +259,7 @@
   const overlay = document.getElementById("overlay");
   const cam = document.getElementById("cam");
   const cursor = document.getElementById("cursor");
+  const damage = document.getElementById("damage");
   const scoreEl = document.getElementById("score");
   const timeEl = document.getElementById("time");
   const statusEl = document.getElementById("status");
@@ -204,77 +275,165 @@
   let timeLeft = GAME_SECONDS;
   let running = false;
   let pinching = false;
+  let wasPinching = false;     // edge-detect so one pinch = one catch
   let pinchX = -999, pinchY = -999;
   let handSeen = false;
-  let lobsters = [];
+  let entities = [];
   let timerId = null;
   let rafId = null;
   let lastTs = 0;
 
-  // ---- Lobster entities ----
-  function spawnLobster() {
+  // ---- Audio (tiny WebAudio blips, no files) ----
+  let actx = null;
+  function beep(freq, dur, type, gain) {
+    try {
+      if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+      const o = actx.createOscillator();
+      const g = actx.createGain();
+      o.type = type || "sine";
+      o.frequency.value = freq;
+      g.gain.value = gain || 0.06;
+      o.connect(g); g.connect(actx.destination);
+      const t = actx.currentTime;
+      o.start(t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.stop(t + dur);
+    } catch (e) { /* ignore */ }
+  }
+
+  // ---- Effects ----
+  function explode(x, y, bad) {
+    const boom = document.createElement("div");
+    boom.className = "boom" + (bad ? " bad" : "");
+    boom.style.left = x + "px";
+    boom.style.top = y + "px";
+
+    const flash = document.createElement("div");
+    flash.className = "flash";
+    boom.appendChild(flash);
+
+    const n = 12;
+    for (let i = 0; i < n; i++) {
+      const s = document.createElement("div");
+      s.className = "spark";
+      const ang = (Math.PI * 2 * i) / n + Math.random() * 0.5;
+      const dist = 60 + Math.random() * 50;
+      const tx = Math.cos(ang) * dist;
+      const ty = Math.sin(ang) * dist;
+      s.animate(
+        [
+          { transform: "translate(0,0) scale(1)", opacity: 1 },
+          { transform: "translate(" + tx + "px," + ty + "px) scale(.2)", opacity: 0 },
+        ],
+        { duration: 500 + Math.random() * 200, easing: "ease-out", fill: "forwards" }
+      );
+      boom.appendChild(s);
+    }
+    overlay.appendChild(boom);
+    setTimeout(() => boom.remove(), 800);
+  }
+
+  function popup(x, y, text, kind) {
+    const p = document.createElement("div");
+    p.className = "popup " + kind;
+    p.textContent = text;
+    p.style.left = x + "px";
+    p.style.top = y + "px";
+    overlay.appendChild(p);
+    setTimeout(() => p.remove(), 850);
+  }
+
+  function flashDamage() {
+    damage.classList.remove("hit");
+    void damage.offsetWidth; // restart animation
+    damage.classList.add("hit");
+  }
+
+  // ---- Entities (lobsters + sharks) ----
+  function spawnEntity(type) {
     const el = document.createElement("div");
     el.className = "lobster";
-    el.textContent = "🦞";
+    el.textContent = type === "shark" ? "🦈" : "🦞";
     overlay.appendChild(el);
     const margin = 60;
     const w = window.innerWidth, h = window.innerHeight;
-    const lob = {
+    const speed = type === "shark" ? 130 : 90;
+    const ang = Math.random() * Math.PI * 2;
+    const ent = {
       el,
+      type,
       x: margin + Math.random() * (w - margin * 2),
       y: margin + Math.random() * (h - margin * 2),
-      vx: (Math.random() * 2 - 1) * 90,
-      vy: (Math.random() * 2 - 1) * 90,
+      vx: Math.cos(ang) * speed,
+      vy: Math.sin(ang) * speed,
       alive: true,
     };
-    lobsters.push(lob);
-    draw(lob);
+    entities.push(ent);
+    place(ent);
   }
 
-  function draw(lob) {
-    lob.el.style.left = lob.x + "px";
-    lob.el.style.top = lob.y + "px";
+  function place(ent) {
+    ent.el.style.left = ent.x + "px";
+    ent.el.style.top = ent.y + "px";
   }
 
-  function updateLobsters(dt) {
+  function updateEntities(dt) {
     const w = window.innerWidth, h = window.innerHeight;
-    for (const lob of lobsters) {
-      if (!lob.alive) continue;
-      lob.x += lob.vx * dt;
-      lob.y += lob.vy * dt;
-      // bounce off edges
-      if (lob.x < 40) { lob.x = 40; lob.vx = Math.abs(lob.vx); }
-      if (lob.x > w - 40) { lob.x = w - 40; lob.vx = -Math.abs(lob.vx); }
-      if (lob.y < 40) { lob.y = 40; lob.vy = Math.abs(lob.vy); }
-      if (lob.y > h - 40) { lob.y = h - 40; lob.vy = -Math.abs(lob.vy); }
-      // gentle facing flip based on direction
-      lob.el.style.transform = "translate(-50%, -50%) scaleX(" + (lob.vx < 0 ? -1 : 1) + ")";
-      draw(lob);
+    for (const ent of entities) {
+      if (!ent.alive) continue;
+      ent.x += ent.vx * dt;
+      ent.y += ent.vy * dt;
+      if (ent.x < 40) { ent.x = 40; ent.vx = Math.abs(ent.vx); }
+      if (ent.x > w - 40) { ent.x = w - 40; ent.vx = -Math.abs(ent.vx); }
+      if (ent.y < 40) { ent.y = 40; ent.vy = Math.abs(ent.vy); }
+      if (ent.y > h - 40) { ent.y = h - 40; ent.vy = -Math.abs(ent.vy); }
+      ent.el.style.transform = "translate(-50%, -50%) scaleX(" + (ent.vx < 0 ? -1 : 1) + ")";
+      place(ent);
     }
   }
 
   function tryCatch() {
-    if (!pinching) return;
-    for (const lob of lobsters) {
-      if (!lob.alive) continue;
-      const dx = lob.x - pinchX;
-      const dy = lob.y - pinchY;
+    // only act on the moment a pinch begins
+    if (!(pinching && !wasPinching)) return;
+    for (const ent of entities) {
+      if (!ent.alive) continue;
+      const dx = ent.x - pinchX;
+      const dy = ent.y - pinchY;
       if (dx * dx + dy * dy <= CATCH_RADIUS * CATCH_RADIUS) {
-        lob.alive = false;
-        lob.el.classList.add("caught");
-        const dead = lob.el;
-        setTimeout(() => dead.remove(), 400);
-        score++;
-        scoreEl.textContent = score;
-        // respawn a fresh one shortly
-        setTimeout(() => { if (running && countAlive() < MAX_LOBSTERS) spawnLobster(); }, 350);
-        break; // one catch per pinch frame feels fair
+        catchEntity(ent);
+        break; // one catch per pinch
       }
     }
   }
 
-  function countAlive() {
-    return lobsters.filter((l) => l.alive).length;
+  function catchEntity(ent) {
+    ent.alive = false;
+    const x = ent.x, y = ent.y, dead = ent.el;
+
+    if (ent.type === "shark") {
+      score = Math.max(0, score - SHARK_POINTS);
+      explode(x, y, true);
+      popup(x, y, "−" + SHARK_POINTS, "minus");
+      flashDamage();
+      beep(140, 0.3, "sawtooth", 0.09);
+      dead.classList.add("caught");
+      setTimeout(() => dead.remove(), 400);
+      setTimeout(() => { if (running && countType("shark") < MAX_SHARKS) spawnEntity("shark"); }, 1200);
+    } else {
+      score += 1;
+      explode(x, y, false);
+      popup(x, y, "+1", "plus");
+      beep(660, 0.12, "triangle", 0.07);
+      beep(990, 0.1, "triangle", 0.05);
+      dead.classList.add("caught");
+      setTimeout(() => dead.remove(), 400);
+      setTimeout(() => { if (running && countType("lobster") < MAX_LOBSTERS) spawnEntity("lobster"); }, 350);
+    }
+    scoreEl.textContent = score;
+  }
+
+  function countType(type) {
+    return entities.filter((e) => e.alive && e.type === type).length;
   }
 
   // ---- Main loop ----
@@ -284,8 +443,9 @@
     const dt = Math.min((ts - lastTs) / 1000, 0.05);
     lastTs = ts;
 
-    updateLobsters(dt);
+    updateEntities(dt);
     tryCatch();
+    wasPinching = pinching;
 
     rafId = requestAnimationFrame(loop);
   }
@@ -306,7 +466,6 @@
     const thumb = lm[4];
     const index = lm[8];
 
-    // midpoint between thumb & index = the pinch point
     const mx = (thumb.x + index.x) / 2;
     const my = (thumb.y + index.y) / 2;
 
@@ -314,13 +473,11 @@
     pinchX = (1 - mx) * window.innerWidth;
     pinchY = my * window.innerHeight;
 
-    // 3D-ish distance (normalized) between thumb & index
     const dx = thumb.x - index.x;
     const dy = thumb.y - index.y;
     const dz = (thumb.z || 0) - (index.z || 0);
     const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-    // hysteresis so it doesn't flicker
     if (!pinching && dist < PINCH_ON) pinching = true;
     else if (pinching && dist > PINCH_OFF) pinching = false;
 
@@ -357,22 +514,25 @@
   }
 
   // ---- Game flow ----
-  function clearLobsters() {
-    for (const lob of lobsters) lob.el.remove();
-    lobsters = [];
+  function clearEntities() {
+    for (const ent of entities) ent.el.remove();
+    entities = [];
   }
 
   function startGame() {
-    clearLobsters();
+    clearEntities();
     score = 0;
     timeLeft = GAME_SECONDS;
+    pinching = false;
+    wasPinching = false;
     scoreEl.textContent = "0";
     timeEl.textContent = String(timeLeft);
     running = true;
     lastTs = 0;
     endPanel.classList.add("hidden");
 
-    for (let i = 0; i < 3; i++) spawnLobster();
+    for (let i = 0; i < 3; i++) spawnEntity("lobster");
+    for (let i = 0; i < 2; i++) spawnEntity("shark");
 
     timerId = setInterval(() => {
       timeLeft--;
@@ -387,14 +547,14 @@
     running = false;
     clearInterval(timerId);
     cancelAnimationFrame(rafId);
-    clearLobsters();
+    clearEntities();
     finalScoreEl.textContent = String(score);
     endMsg.textContent = ratingMessage(score);
     endPanel.classList.remove("hidden");
   }
 
   function ratingMessage(s) {
-    if (s === 0) return "The lobsters got away. Try better lighting and pinch right on them!";
+    if (s === 0) return "The lobsters got away (and the sharks won). Aim for lobsters, dodge fins!";
     if (s < 10) return "Nice start, deckhand. 🦞";
     if (s < 20) return "Solid haul! You've got the pinch down.";
     if (s < 35) return "Master trapper! 🎣 The bay is impressed.";
