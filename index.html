@@ -45,7 +45,7 @@
   }
   .lobster {
     position: absolute;
-    font-size: 54px;
+    font-size: 72px;
     will-change: transform;
     transform: translate(-50%, -50%);
     pointer-events: none;
@@ -114,21 +114,8 @@
     100% { transform: translate(-50%, -160%) scale(1); opacity: 0; }
   }
 
-  /* Red damage flash over the whole screen when a shark bites */
-  #damage {
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    background: radial-gradient(circle, rgba(255,0,0,0) 40%, rgba(255,0,0,.35) 100%);
-    opacity: 0;
-    z-index: 4;
-  }
-  #damage.hit { animation: dmg .4s ease-out; }
-  @keyframes dmg {
-    0% { opacity: 0; } 30% { opacity: 1; } 100% { opacity: 0; }
-  }
-  /* Hand cursor (pinch point) */
-  #cursor {
+  /* Hand cursor (pinch point) — one per player/hand */
+  .cursor {
     position: absolute;
     width: 64px;
     height: 64px;
@@ -141,13 +128,33 @@
     display: none;
     z-index: 5;
   }
-  #cursor.pinching {
+  .cursor.pinching {
     width: 30px;
     height: 30px;
     margin: -15px 0 0 -15px;
     background: rgba(255,107,74,.55);
     border-color: var(--accent-2);
   }
+
+  /* Instruction banner at the top of the game */
+  #instructions {
+    position: absolute;
+    top: 64px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-weight: 800;
+    font-size: clamp(20px, 4vw, 34px);
+    letter-spacing: -.5px;
+    padding: 8px 22px;
+    border-radius: 999px;
+    background: rgba(0,0,0,.35);
+    backdrop-filter: blur(4px);
+    text-shadow: 0 2px 6px rgba(0,0,0,.5);
+    z-index: 6;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  #instructions.hidden { display: none; }
 
   /* HUD */
   #hud {
@@ -214,8 +221,9 @@
 <div id="stage">
   <video id="cam" autoplay playsinline muted></video>
   <div id="overlay"></div>
-  <div id="damage"></div>
-  <div id="cursor"></div>
+  <div id="cursors"></div>
+
+  <div id="instructions" class="hidden">🦞 Pinch the lobsters!</div>
 
   <div id="hud">
     <div class="pill">🦞 <span id="score">0</span></div>
@@ -225,7 +233,7 @@
   <!-- Start panel -->
   <div id="startPanel" class="panel">
     <h1><span class="em">🦞</span> Lobster Pinch</h1>
-    <p>Catch lobsters with your hand! Move your hand in front of the webcam, then <b>pinch your thumb and index finger together</b> right on a lobster to snag it (+1). Watch out for <b>sharks 🦈</b> — pinch one and you lose points!</p>
+    <p>Catch lobsters with multiple players! Hold your hands up in front of the webcam, then <b>pinch your thumb and index finger together</b> right on a lobster to snag it (+1). Up to four hands can play at once — most lobsters wins!</p>
     <p class="hint">Works best in a well-lit room. Your camera stays on your device — nothing is uploaded.</p>
     <button id="startBtn">Allow camera &amp; play</button>
     <div id="status" class="status"></div>
@@ -236,7 +244,8 @@
     <h1>Time's up! 🎣</h1>
     <div class="score-big"><span id="finalScore">0</span> lobsters</div>
     <p id="endMsg"></p>
-    <button id="againBtn">Play again</button>
+    <p class="hint">Next round in <span id="countdown">10</span>…</p>
+    <button id="againBtn">Play again now</button>
   </div>
 </div>
 
@@ -248,18 +257,18 @@
   "use strict";
 
   const GAME_SECONDS = 60;
+  const RESTART_SECONDS = 10;  // "Time's up" pause before the next round auto-starts
   const MAX_LOBSTERS = 6;
-  const MAX_SHARKS = 3;
-  const SHARK_POINTS = 3;      // points lost when you pinch a shark
-  const CATCH_RADIUS = 70;     // px around pinch point that counts as a catch
+  const MAX_HANDS = 4;         // how many hands/players can play at once
+  const CATCH_RADIUS = 85;     // px around pinch point that counts as a catch
   const PINCH_ON = 0.05;       // normalized thumb-index distance to start a pinch
   const PINCH_OFF = 0.08;      // release threshold (hysteresis)
 
   const stage = document.getElementById("stage");
   const overlay = document.getElementById("overlay");
   const cam = document.getElementById("cam");
-  const cursor = document.getElementById("cursor");
-  const damage = document.getElementById("damage");
+  const cursorsLayer = document.getElementById("cursors");
+  const instructions = document.getElementById("instructions");
   const scoreEl = document.getElementById("score");
   const timeEl = document.getElementById("time");
   const statusEl = document.getElementById("status");
@@ -270,18 +279,29 @@
   const againBtn = document.getElementById("againBtn");
   const finalScoreEl = document.getElementById("finalScore");
   const endMsg = document.getElementById("endMsg");
+  const countdownEl = document.getElementById("countdown");
 
   let score = 0;
   let timeLeft = GAME_SECONDS;
   let running = false;
-  let pinching = false;
-  let wasPinching = false;     // edge-detect so one pinch = one catch
-  let pinchX = -999, pinchY = -999;
   let handSeen = false;
   let entities = [];
   let timerId = null;
   let rafId = null;
+  let restartId = null;        // countdown interval between rounds
   let lastTs = 0;
+
+  // One state slot per possible hand/player. MediaPipe hand order can swap
+  // between frames, but per-slot edge detection is fine for a casual game.
+  const handStates = [];
+  const cursors = [];
+  for (let i = 0; i < MAX_HANDS; i++) {
+    handStates.push({ x: -999, y: -999, pinching: false, wasPinching: false, active: false });
+    const c = document.createElement("div");
+    c.className = "cursor";
+    cursorsLayer.appendChild(c);
+    cursors.push(c);
+  }
 
   // ---- Audio (tiny WebAudio blips, no files) ----
   let actx = null;
@@ -343,25 +363,18 @@
     setTimeout(() => p.remove(), 850);
   }
 
-  function flashDamage() {
-    damage.classList.remove("hit");
-    void damage.offsetWidth; // restart animation
-    damage.classList.add("hit");
-  }
-
-  // ---- Entities (lobsters + sharks) ----
-  function spawnEntity(type) {
+  // ---- Entities (lobsters) ----
+  function spawnEntity() {
     const el = document.createElement("div");
     el.className = "lobster";
-    el.textContent = type === "shark" ? "🦈" : "🦞";
+    el.textContent = "🦞";
     overlay.appendChild(el);
     const margin = 60;
     const w = window.innerWidth, h = window.innerHeight;
-    const speed = type === "shark" ? 130 : 90;
+    const speed = 90;
     const ang = Math.random() * Math.PI * 2;
     const ent = {
       el,
-      type,
       x: margin + Math.random() * (w - margin * 2),
       y: margin + Math.random() * (h - margin * 2),
       vx: Math.cos(ang) * speed,
@@ -392,13 +405,12 @@
     }
   }
 
-  function tryCatch() {
-    // only act on the moment a pinch begins
-    if (!(pinching && !wasPinching)) return;
+  // Check a single pinch point (one player's hand) against the lobsters.
+  function tryCatchAt(px, py) {
     for (const ent of entities) {
       if (!ent.alive) continue;
-      const dx = ent.x - pinchX;
-      const dy = ent.y - pinchY;
+      const dx = ent.x - px;
+      const dy = ent.y - py;
       if (dx * dx + dy * dy <= CATCH_RADIUS * CATCH_RADIUS) {
         catchEntity(ent);
         break; // one catch per pinch
@@ -410,30 +422,19 @@
     ent.alive = false;
     const x = ent.x, y = ent.y, dead = ent.el;
 
-    if (ent.type === "shark") {
-      score = Math.max(0, score - SHARK_POINTS);
-      explode(x, y, true);
-      popup(x, y, "−" + SHARK_POINTS, "minus");
-      flashDamage();
-      beep(140, 0.3, "sawtooth", 0.09);
-      dead.classList.add("caught");
-      setTimeout(() => dead.remove(), 400);
-      setTimeout(() => { if (running && countType("shark") < MAX_SHARKS) spawnEntity("shark"); }, 1200);
-    } else {
-      score += 1;
-      explode(x, y, false);
-      popup(x, y, "+1", "plus");
-      beep(660, 0.12, "triangle", 0.07);
-      beep(990, 0.1, "triangle", 0.05);
-      dead.classList.add("caught");
-      setTimeout(() => dead.remove(), 400);
-      setTimeout(() => { if (running && countType("lobster") < MAX_LOBSTERS) spawnEntity("lobster"); }, 350);
-    }
+    score += 1;
+    explode(x, y, false);
+    popup(x, y, "+1", "plus");
+    beep(660, 0.12, "triangle", 0.07);
+    beep(990, 0.1, "triangle", 0.05);
+    dead.classList.add("caught");
+    setTimeout(() => dead.remove(), 400);
+    setTimeout(() => { if (running && countLobsters() < MAX_LOBSTERS) spawnEntity(); }, 350);
     scoreEl.textContent = score;
   }
 
-  function countType(type) {
-    return entities.filter((e) => e.alive && e.type === type).length;
+  function countLobsters() {
+    return entities.filter((e) => e.alive).length;
   }
 
   // ---- Main loop ----
@@ -444,47 +445,59 @@
     lastTs = ts;
 
     updateEntities(dt);
-    tryCatch();
-    wasPinching = pinching;
+
+    // Per-hand edge detection: each player gets a catch on the moment they pinch.
+    for (const st of handStates) {
+      if (st.active && st.pinching && !st.wasPinching) tryCatchAt(st.x, st.y);
+      st.wasPinching = st.pinching;
+    }
 
     rafId = requestAnimationFrame(loop);
   }
 
-  // ---- Pinch / hand tracking ----
+  // ---- Pinch / hand tracking (multiple hands / players) ----
   function onResults(results) {
-    const hands = results.multiHandLandmarks;
-    if (!hands || hands.length === 0) {
-      handSeen = false;
-      cursor.style.display = "none";
-      pinching = false;
-      cursor.classList.remove("pinching");
-      if (running) statusEl.textContent = "";
-      return;
+    const hands = results.multiHandLandmarks || [];
+    const count = Math.min(hands.length, MAX_HANDS);
+    handSeen = count > 0;
+
+    for (let i = 0; i < MAX_HANDS; i++) {
+      const st = handStates[i];
+      const c = cursors[i];
+      if (i < count) {
+        const lm = hands[i];
+        const thumb = lm[4];
+        const index = lm[8];
+
+        const mx = (thumb.x + index.x) / 2;
+        const my = (thumb.y + index.y) / 2;
+
+        // video is mirrored on screen, so flip x to match
+        st.x = (1 - mx) * window.innerWidth;
+        st.y = my * window.innerHeight;
+
+        const dx = thumb.x - index.x;
+        const dy = thumb.y - index.y;
+        const dz = (thumb.z || 0) - (index.z || 0);
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+        if (!st.pinching && dist < PINCH_ON) st.pinching = true;
+        else if (st.pinching && dist > PINCH_OFF) st.pinching = false;
+
+        st.active = true;
+        c.style.display = "block";
+        c.style.left = st.x + "px";
+        c.style.top = st.y + "px";
+        c.classList.toggle("pinching", st.pinching);
+      } else {
+        st.active = false;
+        st.pinching = false;
+        c.style.display = "none";
+        c.classList.remove("pinching");
+      }
     }
-    handSeen = true;
-    const lm = hands[0];
-    const thumb = lm[4];
-    const index = lm[8];
 
-    const mx = (thumb.x + index.x) / 2;
-    const my = (thumb.y + index.y) / 2;
-
-    // video is mirrored on screen, so flip x to match
-    pinchX = (1 - mx) * window.innerWidth;
-    pinchY = my * window.innerHeight;
-
-    const dx = thumb.x - index.x;
-    const dy = thumb.y - index.y;
-    const dz = (thumb.z || 0) - (index.z || 0);
-    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-
-    if (!pinching && dist < PINCH_ON) pinching = true;
-    else if (pinching && dist > PINCH_OFF) pinching = false;
-
-    cursor.style.display = "block";
-    cursor.style.left = pinchX + "px";
-    cursor.style.top = pinchY + "px";
-    cursor.classList.toggle("pinching", pinching);
+    if (running && count > 0) statusEl.textContent = "";
   }
 
   let hands = null;
@@ -496,7 +509,7 @@
         "https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/" + file,
     });
     hands.setOptions({
-      maxNumHands: 1,
+      maxNumHands: MAX_HANDS,
       modelComplexity: 1,
       minDetectionConfidence: 0.6,
       minTrackingConfidence: 0.6,
@@ -520,19 +533,19 @@
   }
 
   function startGame() {
+    if (restartId) { clearInterval(restartId); restartId = null; }
     clearEntities();
     score = 0;
     timeLeft = GAME_SECONDS;
-    pinching = false;
-    wasPinching = false;
+    for (const st of handStates) { st.pinching = false; st.wasPinching = false; }
     scoreEl.textContent = "0";
     timeEl.textContent = String(timeLeft);
     running = true;
     lastTs = 0;
     endPanel.classList.add("hidden");
+    instructions.classList.remove("hidden");
 
-    for (let i = 0; i < 3; i++) spawnEntity("lobster");
-    for (let i = 0; i < 2; i++) spawnEntity("shark");
+    for (let i = 0; i < 5; i++) spawnEntity();
 
     timerId = setInterval(() => {
       timeLeft--;
@@ -548,13 +561,27 @@
     clearInterval(timerId);
     cancelAnimationFrame(rafId);
     clearEntities();
+    instructions.classList.add("hidden");
     finalScoreEl.textContent = String(score);
     endMsg.textContent = ratingMessage(score);
     endPanel.classList.remove("hidden");
+
+    // Show "Time's up" for RESTART_SECONDS, then auto-start the next round.
+    let remaining = RESTART_SECONDS;
+    countdownEl.textContent = String(remaining);
+    restartId = setInterval(() => {
+      remaining--;
+      countdownEl.textContent = String(Math.max(0, remaining));
+      if (remaining <= 0) {
+        clearInterval(restartId);
+        restartId = null;
+        startGame();
+      }
+    }, 1000);
   }
 
   function ratingMessage(s) {
-    if (s === 0) return "The lobsters got away (and the sharks won). Aim for lobsters, dodge fins!";
+    if (s === 0) return "The lobsters all got away! Pinch right on one to snag it. 🦞";
     if (s < 10) return "Nice start, deckhand. 🦞";
     if (s < 20) return "Solid haul! You've got the pinch down.";
     if (s < 35) return "Master trapper! 🎣 The bay is impressed.";
