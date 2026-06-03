@@ -261,8 +261,11 @@
   const MAX_LOBSTERS = 6;
   const MAX_HANDS = 4;         // how many hands/players can play at once
   const CATCH_RADIUS = 85;     // px around pinch point that counts as a catch
-  const PINCH_ON = 0.05;       // normalized thumb-index distance to start a pinch
-  const PINCH_OFF = 0.08;      // release threshold (hysteresis)
+  // Pinch is measured RELATIVE to the hand's own size (palm length) so it works
+  // at any distance from the camera — far away the whole hand is small, but the
+  // ratio of thumb-index gap to palm length stays roughly the same.
+  const PINCH_ON = 0.55;       // gap/palm ratio at or below which a pinch starts
+  const PINCH_OFF = 0.75;      // release ratio (hysteresis)
 
   const stage = document.getElementById("stage");
   const overlay = document.getElementById("overlay");
@@ -301,6 +304,14 @@
     c.className = "cursor";
     cursorsLayer.appendChild(c);
     cursors.push(c);
+  }
+
+  // ---- Helpers ----
+  function dist3(a, b) {
+    const dx = a.x - b.x;
+    const dy = a.y - b.y;
+    const dz = (a.z || 0) - (b.z || 0);
+    return Math.sqrt(dx * dx + dy * dy + dz * dz);
   }
 
   // ---- Audio (tiny WebAudio blips, no files) ----
@@ -468,6 +479,8 @@
         const lm = hands[i];
         const thumb = lm[4];
         const index = lm[8];
+        const wrist = lm[0];
+        const midMcp = lm[9];   // middle-finger knuckle
 
         const mx = (thumb.x + index.x) / 2;
         const my = (thumb.y + index.y) / 2;
@@ -476,13 +489,14 @@
         st.x = (1 - mx) * window.innerWidth;
         st.y = my * window.innerHeight;
 
-        const dx = thumb.x - index.x;
-        const dy = thumb.y - index.y;
-        const dz = (thumb.z || 0) - (index.z || 0);
-        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        const gap = dist3(thumb, index);
+        // palm length (wrist -> middle knuckle) scales with distance from the
+        // camera the same way the gap does, so the ratio is distance-invariant.
+        const palm = Math.max(dist3(wrist, midMcp), 1e-4);
+        const ratio = gap / palm;
 
-        if (!st.pinching && dist < PINCH_ON) st.pinching = true;
-        else if (st.pinching && dist > PINCH_OFF) st.pinching = false;
+        if (!st.pinching && ratio < PINCH_ON) st.pinching = true;
+        else if (st.pinching && ratio > PINCH_OFF) st.pinching = false;
 
         st.active = true;
         c.style.display = "block";
