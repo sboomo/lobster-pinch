@@ -1,4 +1,4 @@
-# 🦞 Lobster Pinch
+# 🦞 Lobster Pinch.
 
 A webcam hand-tracking game. Lobsters swim around your screen — **pinch your thumb and index finger together** right on one to catch it. Rack up as many as you can before the timer runs out. **Up to four hands can play at once**, and the game runs continuously — when time's up it shows your score for 10 seconds, then auto-starts the next round.
 
