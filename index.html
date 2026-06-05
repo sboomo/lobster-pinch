@@ -36,6 +36,25 @@
     transform: scaleX(-1);
     opacity: 0.28;
     filter: saturate(0.7) brightness(0.8);
+    transition: opacity .3s ease, filter .3s ease;
+  }
+  /* Brighten the camera while players pose for the leaderboard photo */
+  #cam.posing {
+    opacity: 0.95;
+    filter: none;
+  }
+  /* Camera-flash effect when the photo is taken */
+  #flash {
+    position: absolute;
+    inset: 0;
+    background: #fff;
+    opacity: 0;
+    pointer-events: none;
+    z-index: 9;
+  }
+  #flash.snap { animation: snap .5s ease-out; }
+  @keyframes snap {
+    0% { opacity: 0; } 12% { opacity: .9; } 100% { opacity: 0; }
   }
   #overlay {
     position: absolute;
@@ -197,6 +216,18 @@
   .panel h1 .em { font-size: 1.1em; }
   .panel p { font-size: clamp(15px, 2.6vw, 19px); max-width: 540px; line-height: 1.5; opacity: .92; }
   .panel .score-big { font-size: clamp(40px, 9vw, 80px); color: var(--accent-2); font-weight: 800; }
+  .count-big {
+    font-size: clamp(90px, 22vw, 200px);
+    font-weight: 800;
+    line-height: 1;
+    color: var(--accent-2);
+    text-shadow: 0 6px 20px rgba(0,0,0,.5);
+    animation: countPulse 1s ease-in-out infinite;
+  }
+  @keyframes countPulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.12); }
+  }
   button {
     font: inherit;
     font-weight: 700;
@@ -283,12 +314,13 @@
   <video id="cam" autoplay playsinline muted></video>
   <div id="overlay"></div>
   <div id="cursors"></div>
+  <div id="flash"></div>
 
   <div id="instructions" class="hidden">🦞 Pinch the lobsters!</div>
 
   <div id="hud">
     <div class="pill">🦞 <span id="score">0</span></div>
-    <div class="pill">⏱ <span id="time">60</span></div>
+    <div class="pill">⏱ <span id="time">30</span></div>
   </div>
 
   <!-- Start panel -->
@@ -299,12 +331,20 @@
     <button id="startBtn">Allow camera &amp; play</button>
     <div id="status" class="status"></div>
     <div class="lb-wrap">
-      <div class="lb-title">🏆 Leaderboard</div>
+      <div class="lb-title">🏆 Leaderboard — Top 10</div>
       <div id="leaderboardStart" class="leaderboard"></div>
     </div>
   </div>
 
-  <!-- Game over panel -->
+  <!-- Photo countdown panel -->
+  <div id="photoPanel" class="panel hidden">
+    <h1>📸 Smile!</h1>
+    <p>Leaderboard photo in…</p>
+    <div class="count-big" id="photoCount">5</div>
+    <p class="hint">You scored <span id="photoScore">0</span> 🦞 — strike a pose!</p>
+  </div>
+
+  <!-- Game over / leaderboard panel -->
   <div id="endPanel" class="panel hidden">
     <h1>Time's up! 🎣</h1>
     <div class="score-big"><span id="finalScore">0</span> lobsters</div>
@@ -312,7 +352,7 @@
     <p class="hint">Next round in <span id="countdown">10</span>…</p>
     <button id="againBtn">Play again now</button>
     <div class="lb-wrap">
-      <div class="lb-title">🏆 Leaderboard</div>
+      <div class="lb-title">🏆 Leaderboard — Top 10</div>
       <div id="leaderboardEnd" class="leaderboard"></div>
     </div>
   </div>
@@ -325,8 +365,9 @@
 (function () {
   "use strict";
 
-  const GAME_SECONDS = 60;
-  const RESTART_SECONDS = 10;  // "Time's up" pause before the next round auto-starts
+  const GAME_SECONDS = 30;
+  const PHOTO_SECONDS = 5;     // pose countdown before the leaderboard photo is taken
+  const RESTART_SECONDS = 10;  // how long the top-10 leaderboard stays up before next round
   const MAX_LOBSTERS = 6;
   const MAX_HANDS = 4;         // how many hands/players can play at once
   const CATCH_RADIUS = 85;     // px around pinch point that counts as a catch
@@ -341,11 +382,15 @@
   const cam = document.getElementById("cam");
   const cursorsLayer = document.getElementById("cursors");
   const instructions = document.getElementById("instructions");
+  const flashEl = document.getElementById("flash");
   const scoreEl = document.getElementById("score");
   const timeEl = document.getElementById("time");
   const statusEl = document.getElementById("status");
 
   const startPanel = document.getElementById("startPanel");
+  const photoPanel = document.getElementById("photoPanel");
+  const photoCountEl = document.getElementById("photoCount");
+  const photoScoreEl = document.getElementById("photoScore");
   const endPanel = document.getElementById("endPanel");
   const startBtn = document.getElementById("startBtn");
   const againBtn = document.getElementById("againBtn");
@@ -362,7 +407,8 @@
   let entities = [];
   let timerId = null;
   let rafId = null;
-  let restartId = null;        // countdown interval between rounds
+  let restartId = null;        // countdown interval before the next round
+  let photoId = null;          // pose-countdown interval before the photo
   let lastTs = 0;
 
   // One state slot per possible hand/player. MediaPipe hand order can swap
@@ -683,6 +729,10 @@
 
   function startGame() {
     if (restartId) { clearInterval(restartId); restartId = null; }
+    if (photoId) { clearInterval(photoId); photoId = null; }
+    cam.classList.remove("posing");
+    photoPanel.classList.add("hidden");
+    flashEl.classList.remove("snap");
     clearEntities();
     score = 0;
     timeLeft = GAME_SECONDS;
@@ -705,23 +755,57 @@
     rafId = requestAnimationFrame(loop);
   }
 
+  // Round over: clear the board, run a 5s pose countdown, snap the photo,
+  // then show the top-10 leaderboard for RESTART_SECONDS before the next round.
   function endGame() {
     running = false;
     clearInterval(timerId);
     cancelAnimationFrame(rafId);
     instructions.classList.add("hidden");
+    clearEntities();
+    startPhotoCountdown();
+  }
+
+  function cameraFlash() {
+    flashEl.classList.remove("snap");
+    void flashEl.offsetWidth; // restart animation
+    flashEl.classList.add("snap");
+  }
+
+  function startPhotoCountdown() {
+    cam.classList.add("posing");            // brighten the cam so players can pose
+    photoScoreEl.textContent = String(score);
+    let n = PHOTO_SECONDS;
+    photoCountEl.textContent = String(n);
+    photoPanel.classList.remove("hidden");
+    beep(600, 0.08, "sine", 0.05);
+
+    photoId = setInterval(() => {
+      n--;
+      if (n > 0) {
+        photoCountEl.textContent = String(n);
+        beep(600, 0.08, "sine", 0.05);
+      } else {
+        clearInterval(photoId);
+        photoId = null;
+        // Snap!
+        beep(950, 0.16, "triangle", 0.08);
+        cameraFlash();
+        const photo = capturePhoto();
+        cam.classList.remove("posing");
+        photoPanel.classList.add("hidden");
+        const myTs = addToLeaderboard(score, photo);
+        renderLeaderboard(myTs);
+        showLeaderboard();
+      }
+    }, 1000);
+  }
+
+  function showLeaderboard() {
     finalScoreEl.textContent = String(score);
     endMsg.textContent = ratingMessage(score);
-
-    // Snap a webcam photo (while lobsters are still on screen) and record it.
-    const photo = capturePhoto();
-    const myTs = addToLeaderboard(score, photo);
-    renderLeaderboard(myTs);
-
-    clearEntities();
     endPanel.classList.remove("hidden");
 
-    // Show "Time's up" for RESTART_SECONDS, then auto-start the next round.
     let remaining = RESTART_SECONDS;
     countdownEl.textContent = String(remaining);
     restartId = setInterval(() => {
